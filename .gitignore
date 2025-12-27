@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# runtime uploads/temp
+uploads/
+*.zip
+
+# env secrets
+.env
+.env.*
+!.env.example
+
+# build outputs
+dist/
+.next/
+out/
+
+# logs
+logs
+*.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
