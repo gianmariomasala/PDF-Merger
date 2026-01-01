@@ -9,13 +9,6 @@ import {
       File as FileIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { PDFDocument } from "pdf-lib";
-import JSZip from "jszip";
-
-// PDF.js (Vite compatible)
-import * as pdfjsLib from "pdfjs-dist/build/pdf";
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker?url";
-(pdfjsLib as any).GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 interface FileWithStatus {
       file: File;
@@ -23,11 +16,6 @@ interface FileWithStatus {
       paired: boolean;
       groupId?: string;
 }
-
-type DocInfo = {
-      intestatario: string | null;
-      fatturaNo: string | null; // es: "25/02049"
-};
 
 const App: React.FC = () => {
       const [files, setFiles] = useState<FileWithStatus[]>([]);
@@ -39,26 +27,12 @@ const App: React.FC = () => {
       const fileInputRef = useRef<HTMLInputElement>(null);
 
       /* ===========================
-         FILE HANDLING
+         HELPERS
       =========================== */
 
-      // groupId robusto: prende 25-02050 anche se il nome contiene spazi o prefissi/suffissi
       const extractGroupIdFromFilename = (name: string) => {
             const m = name.match(/(\d{2}-\d{4,})/);
             return m ? m[1] : undefined;
-      };
-
-      const handleFiles = (filesList: FileList | null) => {
-            if (!filesList) return;
-
-            const incoming: FileWithStatus[] = Array.from(filesList).map((f) => ({
-                  file: f,
-                  id: Math.random().toString(36).slice(2),
-                  paired: false,
-                  groupId: extractGroupIdFromFilename(f.name),
-            }));
-
-            updatePairing([...files, ...incoming]);
       };
 
       const updatePairing = (currentFiles: FileWithStatus[]) => {
@@ -77,6 +51,23 @@ const App: React.FC = () => {
             setError(null);
       };
 
+      /* ===========================
+         FILE HANDLING
+      =========================== */
+
+      const handleFiles = (filesList: FileList | null) => {
+            if (!filesList) return;
+
+            const incoming: FileWithStatus[] = Array.from(filesList).map((f) => ({
+                  file: f,
+                  id: Math.random().toString(36).slice(2),
+                  paired: false,
+                  groupId: extractGroupIdFromFilename(f.name),
+            }));
+
+            updatePairing([...files, ...incoming]);
+      };
+
       const removeFile = (id: string) => {
             updatePairing(files.filter((f) => f.id !== id));
       };
@@ -85,170 +76,6 @@ const App: React.FC = () => {
             setFiles([]);
             setIsSuccess(false);
             setError(null);
-      };
-
-      /* ===========================
-         HELPERS
-      =========================== */
-
-      const safeFilenamePart = (s: string) =>
-            s
-                  .replace(/[\\/:*?"<>|]/g, "")
-                  .replace(/\s+/g, " ")
-                  .trim()
-                  .slice(0, 140);
-
-      // Ordine: fattura prima (non contiene "allegato"), poi Allegato1, Allegato2...
-      const orderGroupFiles = (groupFiles: FileWithStatus[]) =>
-            [...groupFiles].sort((a, b) => {
-                  const an = a.file.name.toLowerCase();
-                  const bn = b.file.name.toLowerCase();
-
-                  const aIsAll = an.includes("allegato");
-                  const bIsAll = bn.includes("allegato");
-
-                  if (aIsAll !== bIsAll) return aIsAll ? 1 : -1;
-
-                  const aNum = Number((an.match(/allegato\s*(\d+)/i) || [])[1] || 0);
-                  const bNum = Number((bn.match(/allegato\s*(\d+)/i) || [])[1] || 0);
-                  if (aNum !== bNum) return aNum - bNum;
-
-                  return an.localeCompare(bn);
-            });
-
-      // Legge testo (page 2 poi page 1) e tira fuori intestatario + numero fattura
-      const extractDocInfo = async (file: File): Promise<DocInfo> => {
-            try {
-                  const data = new Uint8Array(await file.arrayBuffer());
-                  const doc = await (pdfjsLib as any).getDocument({ data }).promise;
-
-                  const readPageText = async (n: number) => {
-                        const page = await doc.getPage(n);
-                        const tc = await page.getTextContent();
-                        return tc.items.map((it: any) => it.str).join(" ");
-                  };
-
-                  const pagesToTry = [2, 1].filter((p) => p <= doc.numPages);
-
-                  let intestatario: string | null = null;
-                  let fatturaNo: string | null = null;
-
-                  for (const p of pagesToTry) {
-                        const text = await readPageText(p);
-
-                        // Fattura N°: 25/02049 (tipico in pagina 2)
-                        const mf = text.match(/Fattura\s*N[°º]?:\s*([0-9]{2}\/[0-9]{5})/i);
-                        if (!fatturaNo && mf?.[1]) fatturaNo = mf[1].trim();
-
-                        // Intestatario: Dr ...
-                        const mi = text.match(
-                              /Intestatario:\s*([^\n\r]+?)(?:\s{2,}|Allegato|del:|Data|Via|$)/i
-                        );
-                        if (!intestatario && mi?.[1]) intestatario = mi[1].trim();
-
-                        // Fallback: "Dr Nome Cognome"
-                        if (!intestatario) {
-                              const mdr = text.match(/\bDr\s+[A-Za-zÀ-ÿ.'’\-]+\s+[A-Za-zÀ-ÿ.'’\-]+/);
-                              if (mdr?.[0]) intestatario = mdr[0].trim();
-                        }
-
-                        if (intestatario && fatturaNo) break;
-                  }
-
-                  return { intestatario, fatturaNo };
-            } catch {
-                  return { intestatario: null, fatturaNo: null };
-            }
-      };
-
-      /* ===========================
-         MERGE + ZIP
-      =========================== */
-
-      // calcolo gruppi “validi” (>=2 file)
-      const validGroups = useMemo(() => {
-            const groups = files.reduce<Record<string, FileWithStatus[]>>((acc, f) => {
-                  if (!f.groupId) return acc;
-                  (acc[f.groupId] ||= []).push(f);
-                  return acc;
-            }, {});
-            const valid = Object.entries(groups).filter(([, arr]) => arr.length >= 2);
-            return { groups, valid };
-      }, [files]);
-
-      const processFiles = async () => {
-            if (files.length === 0) {
-                  setError("Carica almeno 2 PDF per iniziare.");
-                  return;
-            }
-
-            // DEMO-SAFE: il bottone è cliccabile, ma qui blocchiamo se non ci sono coppie vere
-            if (validGroups.valid.length === 0) {
-                  setError(
-                        "Nessuna coppia valida trovata. Carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e 25-0249_Allegato1.pdf)."
-                  );
-                  return;
-            }
-
-            setIsProcessing(true);
-            setError(null);
-            setIsSuccess(false);
-
-            try {
-                  const zip = new JSZip();
-                  let mergedCount = 0;
-
-                  for (const [groupId, groupFiles] of validGroups.valid) {
-                        const ordered = orderGroupFiles(groupFiles);
-
-                        // info dal primo (fattura)
-                        const info = await extractDocInfo(ordered[0].file);
-
-                        // nome proforma: 25/02049 -> 25-02049
-                        const fatturaDash = info.fatturaNo ? info.fatturaNo.replace("/", "-") : null;
-
-                        // Merge PDF
-                        const mergedPdf = await PDFDocument.create();
-                        for (const f of ordered) {
-                              const pdf = await PDFDocument.load(await f.file.arrayBuffer());
-                              const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-                              pages.forEach((p) => mergedPdf.addPage(p));
-                        }
-                        const mergedBytes = await mergedPdf.save();
-
-                        // Naming: ID - PROFORMA - INTESTATARIO
-                        const parts = [
-                              groupId,
-                              fatturaDash || null,
-                              info.intestatario ? safeFilenamePart(info.intestatario) : null,
-                        ].filter(Boolean) as string[];
-
-                        const filename = `${parts.join(" - ")}.pdf`;
-                        zip.file(filename, mergedBytes);
-                        mergedCount++;
-                  }
-
-                  if (mergedCount === 0) {
-                        throw new Error("Serve almeno una coppia di PDF con lo stesso ID nel nome file.");
-                  }
-
-                  const zipBlob = await zip.generateAsync({ type: "blob" });
-                  const url = window.URL.createObjectURL(zipBlob);
-
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = "pdf_uniti.zip";
-                  document.body.appendChild(a);
-                  a.click();
-                  a.remove();
-                  window.URL.revokeObjectURL(url);
-
-                  setIsSuccess(true);
-            } catch (err: any) {
-                  setError(err?.message || "Errore durante il merge");
-            } finally {
-                  setIsProcessing(false);
-            }
       };
 
       /* ===========================
@@ -265,6 +92,61 @@ const App: React.FC = () => {
       }, [files]);
 
       const hasAnyPairedGroup = files.some((f) => f.paired);
+
+      /* ===========================
+         API CALL (Vercel Serverless)
+      =========================== */
+
+      const processFiles = async () => {
+            if (files.length === 0) {
+                  setError("Carica almeno 2 PDF per iniziare.");
+                  return;
+            }
+
+            if (!hasAnyPairedGroup) {
+                  setError(
+                        "Nessuna coppia valida trovata. Carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e 25-0249_Allegato1.pdf)."
+                  );
+                  return;
+            }
+
+            setIsProcessing(true);
+            setError(null);
+            setIsSuccess(false);
+
+            try {
+                  const formData = new FormData();
+                  files.forEach((f) => formData.append("pdfs", f.file));
+
+                  // IMPORTANT: endpoint relativo, compatibile Vercel
+                  const res = await fetch("/api/merge-pdfs", {
+                        method: "POST",
+                        body: formData,
+                  });
+
+                  if (!res.ok) {
+                        const txt = await res.text();
+                        throw new Error(txt || "Errore durante il merge");
+                  }
+
+                  const blob = await res.blob();
+                  const url = window.URL.createObjectURL(blob);
+
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "pdf_uniti.zip";
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  window.URL.revokeObjectURL(url);
+
+                  setIsSuccess(true);
+            } catch (err: any) {
+                  setError(err?.message || "Errore nel collegamento col server");
+            } finally {
+                  setIsProcessing(false);
+            }
+      };
 
       return (
             <div className="min-h-screen py-12 px-4 flex flex-col items-center bg-[#f8fafc] text-slate-800">
@@ -316,7 +198,10 @@ const App: React.FC = () => {
                               />
                               <p className="text-slate-800 font-semibold text-lg mb-1">Trascina i file PDF qui</p>
                               <p className="text-slate-400 text-sm mb-6">Oppure clicca per selezionare i file</p>
-                              <button className="bg-[#f0f4f8] text-slate-600 px-6 py-2 rounded-md font-medium hover:bg-slate-200 transition-colors">
+                              <button
+                                    type="button"
+                                    className="bg-[#f0f4f8] text-slate-600 px-6 py-2 rounded-md font-medium hover:bg-slate-200 transition-colors"
+                              >
                                     Seleziona File
                               </button>
                         </div>
@@ -341,6 +226,7 @@ const App: React.FC = () => {
                                                             }`}
                                                 >
                                                       <div className="text-xs font-bold text-slate-400 uppercase mb-2">ID: {groupId}</div>
+
                                                       <div className="space-y-1">
                                                             {groupFiles.map((f) => (
                                                                   <div key={f.id} className="flex items-center justify-between text-sm">
@@ -348,6 +234,7 @@ const App: React.FC = () => {
                                                                               <FileText size={14} />
                                                                               <span className="truncate">{f.file.name}</span>
                                                                         </div>
+
                                                                         <button
                                                                               onClick={(e) => {
                                                                                     e.stopPropagation();
@@ -365,7 +252,7 @@ const App: React.FC = () => {
                                           ))}
                                     </div>
 
-                                    {/* DEMO-SAFE: bottone sempre cliccabile (tranne quando sta processando) */}
+                                    {/* Bottone: sempre cliccabile (demo-safe), ma gestisce errori */}
                                     <button
                                           onClick={processFiles}
                                           disabled={isProcessing}
@@ -385,14 +272,14 @@ const App: React.FC = () => {
 
                                     {!hasAnyPairedGroup && (
                                           <p className="text-xs text-slate-400 text-center">
-                                                Suggerimento: carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e 25-0249_Allegato1.pdf)
+                                                Carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e 25-0249_Allegato1.pdf)
                                           </p>
                                     )}
                               </div>
                         )}
                   </div>
 
-                  {/* Footer Text */}
+                  {/* Footer */}
                   <div className="mt-12 text-center text-slate-400 text-sm max-w-lg space-y-2">
                         <p>Carica file PDF con lo stesso numero nel titolo (es. 25-0249.pdf e 25-0249_Allegato1.pdf)</p>
                         <p>I file uniti saranno rinominati con intestatario e numero proforma</p>
