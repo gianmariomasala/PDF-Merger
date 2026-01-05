@@ -8,118 +8,76 @@ export const config = {
   api: { bodyParser: false },
 };
 
-type UploadedFile = {
-  filename: string;
-  buffer: Buffer;
-};
+type UploadedFile = { filename: string; buffer: Buffer };
 
 function safeName(s: string) {
-  return s
-    .replace(/[\\/:*?"<>|]/g, "") // windows forbidden
+  return (s || "")
+    .replace(/[\\/:*?"<>|]/g, "") // no caratteri proibiti (Windows/mac)
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120); // evita nomi folli
+    .trim();
 }
 
-function normalizeIntestatario(raw: string) {
-  let s = (raw || "").trim();
+function extractGroupIdFromFilename(name: string) {
+  const m = name.match(/(\d{2}-\d{4,})/);
+  return m ? m[1] : undefined;
+}
 
-  // taglia roba inutile dopo una virgola lunga (a volte indirizzi o CF)
-  // (non sempre presente, ma aiuta)
-  s = s.replace(/\s{2,}/g, " ");
-
-  // rimuove prefissi/titoli comuni
-  s = s.replace(
-    /^(spett\.?le|spettabile|dott\.?ssa|dott\.?|dr\.?|sig\.?ra|sig\.?|sigg\.?|gent\.?le|ill\.?mo|impresa)\s+/i,
+function stripHonorificPrefix(name: string) {
+  // rimuove SOLO prefissi comuni se stanno all’inizio e seguiti da spazio
+  // (non tocca nomi tipo "DRADIA" o simili, perché richiede "Dr " con spazio)
+  return name.replace(
+    /^(dr|dott\.?|dottore|sig\.?|signor|sig\.ra|signora|spett\.?le)\s+/i,
     ""
   );
-
-  // se resta vuoto, torna al raw
-  if (!s.trim()) s = raw?.trim() || "Documento";
-
-  return safeName(s);
 }
 
-function extractIntestatarioFromText(text: string) {
-  const t = text || "";
+function extractIntestatario(textRaw: string): string {
+  const text = textRaw || "";
 
-  // Varianti realistiche (linea o riga dopo)
-  const patterns: RegExp[] = [
-    /Intestatario\s*:\s*([^\n\r]+)/i,
-    /Intestatario\s*\n\s*([^\n\r]+)/i,
-    /Ragione\s+Sociale\s*:\s*([^\n\r]+)/i,
-    /Ragione\s+Sociale\s*\n\s*([^\n\r]+)/i,
-    /Cliente\s*:\s*([^\n\r]+)/i,
-    /Cliente\s*\n\s*([^\n\r]+)/i,
-    /Destinatario\s*:\s*([^\n\r]+)/i,
-    /Destinatario\s*\n\s*([^\n\r]+)/i,
-  ];
-
-  for (const p of patterns) {
-    const m = t.match(p);
-    if (m?.[1]) return m[1].trim();
+  // 1) Intestatario: ...
+  const mInt = text.match(/Intestatario:\s*([^\n\r]+)/i);
+  if (mInt?.[1]) {
+    const v = safeName(mInt[1]);
+    const cleaned = safeName(stripHonorificPrefix(v));
+    return cleaned || v || "Documento";
   }
 
-  // fallback: una riga con Dr Nome Cognome
-  const dr = t.match(/\bDr\.?\s+[A-Za-zÀ-ÿ.'’\-]+\s+[A-Za-zÀ-ÿ.'’\-]+/);
-  if (dr?.[0]) return dr[0].trim();
+  // 2) Spett.le + riga successiva (spesso è la ragione sociale / clinica)
+  // Esempio tipico:
+  // "Spett.le"
+  // "Clinica Veterinaria Radia S.r.l."
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const idxSpett = lines.findIndex((l) => /^spett\.?le$/i.test(l) || /^spett\.?le\b/i.test(l));
+  if (idxSpett >= 0) {
+    // prova a prendere la riga dopo, poi dopo ancora se è troppo corta
+    const candidate1 = lines[idxSpett + 1] || "";
+    const candidate2 = lines[idxSpett + 2] || "";
+    const cand = (candidate1.length >= 3 ? candidate1 : candidate2) || "";
+    const v = safeName(cand);
+    const cleaned = safeName(stripHonorificPrefix(v));
+    if (cleaned) return cleaned;
+  }
+
+  // 3) Cerca una “ragione sociale” (SRL, SNC, SAS, SPA, ecc.) nel testo
+  const mSoc = text.match(
+    /\b([A-ZÀ-ÿ0-9][A-Za-zÀ-ÿ0-9 '&.,\-]{2,80}\s+(s\.?r\.?l\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?p\.?a\.?|soc\.\s*coop\.)\b)/i
+  );
+  if (mSoc?.[1]) {
+    return safeName(mSoc[1]);
+  }
+
+  // 4) Ultimo fallback: se troviamo una riga “Dr Nome Cognome” la usiamo,
+  // ma poi togliamo "Dr " dal filename.
+  const mDr = text.match(/\bDr\s+([A-Za-zÀ-ÿ.'’\-]+\s+[A-Za-zÀ-ÿ.'’\-]+)/);
+  if (mDr?.[1]) {
+    return safeName(mDr[1]);
+  }
 
   return "Documento";
-}
-
-async function readMultipart(req: VercelRequest): Promise<UploadedFile[]> {
-  return new Promise((resolve, reject) => {
-    const files: UploadedFile[] = [];
-
-    const contentType = req.headers["content-type"] || "";
-    if (!String(contentType).includes("multipart/form-data")) {
-      reject(new Error("Richiesta non multipart/form-data"));
-      return;
-    }
-
-    const bb = Busboy({
-      headers: req.headers,
-      limits: {
-        files: 200,
-        fileSize: 25 * 1024 * 1024, // 25MB per file (alza se serve)
-      },
-    });
-
-    let aborted = false;
-
-    req.on("aborted", () => {
-      aborted = true;
-      reject(new Error("Upload interrotto (aborted)"));
-    });
-
-    req.on("error", (e) => reject(e));
-    bb.on("error", (e) => reject(e));
-
-    bb.on("file", (_fieldname, file, info) => {
-      const chunks: Buffer[] = [];
-
-      file.on("data", (d: Buffer) => chunks.push(d));
-      file.on("limit", () => {
-        reject(new Error(`File troppo grande: ${info.filename}`));
-      });
-      file.on("error", (e) => reject(e));
-
-      file.on("end", () => {
-        if (aborted) return;
-        files.push({
-          filename: info.filename || "file.pdf",
-          buffer: Buffer.concat(chunks),
-        });
-      });
-    });
-
-    bb.on("finish", () => {
-      if (aborted) return;
-      resolve(files);
-    });
-
-    req.pipe(bb);
-  });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -129,9 +87,37 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const files = await readMultipart(req);
+    const files: UploadedFile[] = [];
 
-    if (!files || files.length < 2) {
+    const busboy = Busboy({
+      headers: req.headers,
+      limits: {
+        files: 200,
+        fileSize: 25 * 1024 * 1024, // 25MB per file (alza se serve)
+      },
+    });
+
+    busboy.on("file", (_fieldname, file, info) => {
+      const chunks: Buffer[] = [];
+      file.on("data", (d) => chunks.push(d));
+      file.on("limit", () => {
+        // se supera fileSize, Busboy tronca; gestiamo comunque nel finish
+      });
+      file.on("end", () => {
+        files.push({
+          filename: info.filename,
+          buffer: Buffer.concat(chunks),
+        });
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      busboy.on("finish", () => resolve());
+      busboy.on("error", reject);
+      req.pipe(busboy);
+    });
+
+    if (files.length < 2) {
       res.status(400).send("Servono almeno due PDF");
       return;
     }
@@ -139,18 +125,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // raggruppa per ID (25-02049 ecc)
     const groups: Record<string, UploadedFile[]> = {};
     for (const f of files) {
-      const m = f.filename.match(/(\d{2}-\d{4,})/);
-      if (!m) continue;
-      const id = m[1];
+      const id = extractGroupIdFromFilename(f.filename);
+      if (!id) continue;
       groups[id] ??= [];
       groups[id].push(f);
     }
 
     const zip = new JSZip();
     let merged = 0;
-
-    // per evitare overwrite in zip quando stesso intestatario ricorre
-    const nameCounts: Record<string, number> = {};
+    const usedNames = new Set<string>();
 
     for (const [groupId, groupFiles] of Object.entries(groups)) {
       if (groupFiles.length < 2) continue;
@@ -159,19 +142,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       groupFiles.sort((a, b) => {
         const A = a.filename.toLowerCase();
         const B = b.filename.toLowerCase();
-        if (A.includes("allegato") && !B.includes("allegato")) return 1;
-        if (!A.includes("allegato") && B.includes("allegato")) return -1;
+        const aIsAll = A.includes("allegato");
+        const bIsAll = B.includes("allegato");
+        if (aIsAll && !bIsAll) return 1;
+        if (!aIsAll && bIsAll) return -1;
         return A.localeCompare(B);
       });
 
-      // testo dalla fattura (primo file dopo sort)
+      // estrai testo dalla fattura (primo file del gruppo)
       const parsed = await pdfParse(groupFiles[0].buffer);
       const text = parsed.text || "";
 
-      const rawIntestatario = extractIntestatarioFromText(text);
-      const intestatario = normalizeIntestatario(rawIntestatario);
+      const intestatario = extractIntestatario(text);
 
-      // merge pdf
+      // MERGE
       const mergedPdf = await PDFDocument.create();
       for (const f of groupFiles) {
         const pdf = await PDFDocument.load(f.buffer);
@@ -180,12 +164,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       const bytes = await mergedPdf.save();
 
-      // filename SOLO intestatario (con suffisso anti-duplicati)
-      const base = intestatario || "Documento";
-      nameCounts[base] = (nameCounts[base] || 0) + 1;
-      const suffix = nameCounts[base] > 1 ? ` (${nameCounts[base]})` : "";
+      // ✅ filename SOLO intestatario (no numeri)
+      let base = safeName(intestatario) || "Documento";
+      let filename = `${base}.pdf`;
 
-      const filename = `${base}${suffix}.pdf`;
+      // se duplica dentro lo zip, aggiungi groupId per disambiguare
+      if (usedNames.has(filename)) {
+        filename = `${base} (${groupId}).pdf`;
+      }
+      usedNames.add(filename);
 
       zip.file(filename, bytes);
       merged++;
@@ -202,7 +189,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader("Content-Disposition", 'attachment; filename="pdf_uniti.zip"');
     res.status(200).send(zipBuffer);
   } catch (err: any) {
-    console.error("merge-pdfs error:", err);
-    res.status(500).send(err?.message || "Errore durante il merge PDF");
+    console.error(err);
+    res.status(500).send("Errore durante il merge PDF");
   }
 }
