@@ -4,80 +4,130 @@ import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 import pdfParse from "pdf-parse";
 
-export const config = {
-  api: { bodyParser: false },
+type UploadedFile = {
+  filename: string;
+  buffer: Buffer;
 };
-
-type UploadedFile = { filename: string; buffer: Buffer };
 
 function safeName(s: string) {
   return (s || "")
-    .replace(/[\\/:*?"<>|]/g, "") // no caratteri proibiti (Windows/mac)
+    .replace(/[\\/:*?"<>|]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function extractGroupIdFromFilename(name: string) {
-  const m = name.match(/(\d{2}-\d{4,})/);
+function extractGroupId(filename: string) {
+  const m = filename.match(/(\d{2}-\d{4,})/);
   return m ? m[1] : undefined;
 }
 
-function stripHonorificPrefix(name: string) {
-  // rimuove SOLO prefissi comuni se stanno all’inizio e seguiti da spazio
-  // (non tocca nomi tipo "DRADIA" o simili, perché richiede "Dr " con spazio)
-  return name.replace(
-    /^(dr|dott\.?|dottore|sig\.?|signor|sig\.ra|signora|spett\.?le)\s+/i,
-    ""
-  );
-}
-
-function extractIntestatario(textRaw: string): string {
-  const text = textRaw || "";
+/**
+ * Estrae un intestatario robusto:
+ * 1) "Intestatario: ..."
+ * 2) "Spett.le" + riga successiva (tipico per aziende)
+ * 3) fallback: match "Dr Nome Cognome"
+ * 4) fallback: "Documento"
+ */
+function extractIntestatario(text: string) {
+  const t = text || "";
 
   // 1) Intestatario: ...
-  const mInt = text.match(/Intestatario:\s*([^\n\r]+)/i);
-  if (mInt?.[1]) {
-    const v = safeName(mInt[1]);
-    const cleaned = safeName(stripHonorificPrefix(v));
-    return cleaned || v || "Documento";
-  }
+  const intest = t.match(/Intestatario:\s*([^\n\r]+)/i)?.[1];
+  if (intest) return intest;
 
-  // 2) Spett.le + riga successiva (spesso è la ragione sociale / clinica)
-  // Esempio tipico:
-  // "Spett.le"
-  // "Clinica Veterinaria Radia S.r.l."
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  // 2) Spett.le \n <ragione sociale>
+  const spett1 = t.match(/Spett\.?le\s*[\r\n]+\s*([^\r\n]+)/i)?.[1];
+  if (spett1) return spett1;
 
-  const idxSpett = lines.findIndex((l) => /^spett\.?le$/i.test(l) || /^spett\.?le\b/i.test(l));
-  if (idxSpett >= 0) {
-    // prova a prendere la riga dopo, poi dopo ancora se è troppo corta
-    const candidate1 = lines[idxSpett + 1] || "";
-    const candidate2 = lines[idxSpett + 2] || "";
-    const cand = (candidate1.length >= 3 ? candidate1 : candidate2) || "";
-    const v = safeName(cand);
-    const cleaned = safeName(stripHonorificPrefix(v));
-    if (cleaned) return cleaned;
-  }
+  // 2b) Spett.le <ragione sociale>
+  const spett2 = t.match(/Spett\.?le\s+([^\r\n]+)/i)?.[1];
+  if (spett2) return spett2;
 
-  // 3) Cerca una “ragione sociale” (SRL, SNC, SAS, SPA, ecc.) nel testo
-  const mSoc = text.match(
-    /\b([A-ZÀ-ÿ0-9][A-Za-zÀ-ÿ0-9 '&.,\-]{2,80}\s+(s\.?r\.?l\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?p\.?a\.?|soc\.\s*coop\.)\b)/i
-  );
-  if (mSoc?.[1]) {
-    return safeName(mSoc[1]);
-  }
-
-  // 4) Ultimo fallback: se troviamo una riga “Dr Nome Cognome” la usiamo,
-  // ma poi togliamo "Dr " dal filename.
-  const mDr = text.match(/\bDr\s+([A-Za-zÀ-ÿ.'’\-]+\s+[A-Za-zÀ-ÿ.'’\-]+)/);
-  if (mDr?.[1]) {
-    return safeName(mDr[1]);
-  }
+  // 3) Dr Nome Cognome
+  const dr = t.match(/\bDr\s+[A-Za-zÀ-ÿ.'’\-]+\s+[A-Za-zÀ-ÿ.'’\-]+/i)?.[0];
+  if (dr) return dr;
 
   return "Documento";
+}
+
+/**
+ * Estrae numero fattura/proforma in più formati (5 o 6 cifre dopo lo slash)
+ * es: 25/02049, 26/020477
+ */
+function extractFatturaNumber(text: string, fallbackGroupId: string) {
+  const t = text || "";
+
+  // "Fattura N°: 25/02050" oppure "Fattura Proforma 26/020477"
+  const m =
+    t.match(/Fattura\s*(?:Proforma)?\s*(?:N[°º]?\s*:?)?\s*(\d{2}\/\d{5,6})/i)?.[1] ||
+    t.match(/Fattura\s+Proforma\s+(\d{2}\/\d{5,6})/i)?.[1];
+
+  if (m) return m;
+
+  // fallback: da "25-02049" -> "25/02049"
+  return fallbackGroupId.replace("-", "/");
+}
+
+/**
+ * Legge l'intero body in Buffer (molto più stabile con vercel dev / proxy)
+ */
+async function readRawBody(req: VercelRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Parse multipart via Busboy, ma alimentato da Buffer (bb.end(buffer)),
+ * così evitiamo "Unexpected end of form" da pipe/stream in dev.
+ */
+async function parseMultipart(req: VercelRequest): Promise<UploadedFile[]> {
+  const contentType = req.headers["content-type"] || "";
+  if (!contentType.includes("multipart/form-data")) {
+    throw new Error("Content-Type non valido: serve multipart/form-data");
+  }
+
+  const raw = await readRawBody(req);
+
+  return await new Promise<UploadedFile[]>((resolve, reject) => {
+    const files: UploadedFile[] = [];
+
+    const bb = Busboy({
+      headers: req.headers,
+      limits: {
+        files: 50,
+        fileSize: 25 * 1024 * 1024 // 25MB per file (alza se vuoi)
+      }
+    });
+
+    bb.on("file", (_fieldname, file, info) => {
+      const chunks: Buffer[] = [];
+
+      file.on("data", (d: Buffer) => chunks.push(d));
+
+      file.on("limit", () => {
+        // Se vuoi: reject qui. Io preferisco errore esplicito.
+        reject(new Error(`File troppo grande: ${info.filename}`));
+      });
+
+      file.on("end", () => {
+        files.push({
+          filename: info.filename || "file.pdf",
+          buffer: Buffer.concat(chunks)
+        });
+      });
+
+      file.on("error", reject);
+    });
+
+    bb.on("error", reject);
+    bb.on("finish", () => resolve(files));
+
+    // 🔥 punto chiave: niente req.pipe(bb)
+    bb.end(raw);
+  });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -87,35 +137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const files: UploadedFile[] = [];
-
-    const busboy = Busboy({
-      headers: req.headers,
-      limits: {
-        files: 200,
-        fileSize: 25 * 1024 * 1024, // 25MB per file (alza se serve)
-      },
-    });
-
-    busboy.on("file", (_fieldname, file, info) => {
-      const chunks: Buffer[] = [];
-      file.on("data", (d) => chunks.push(d));
-      file.on("limit", () => {
-        // se supera fileSize, Busboy tronca; gestiamo comunque nel finish
-      });
-      file.on("end", () => {
-        files.push({
-          filename: info.filename,
-          buffer: Buffer.concat(chunks),
-        });
-      });
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      busboy.on("finish", () => resolve());
-      busboy.on("error", reject);
-      req.pipe(busboy);
-    });
+    const files = await parseMultipart(req);
 
     if (files.length < 2) {
       res.status(400).send("Servono almeno due PDF");
@@ -125,15 +147,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // raggruppa per ID (25-02049 ecc)
     const groups: Record<string, UploadedFile[]> = {};
     for (const f of files) {
-      const id = extractGroupIdFromFilename(f.filename);
-      if (!id) continue;
-      groups[id] ??= [];
-      groups[id].push(f);
+      const groupId = extractGroupId(f.filename);
+      if (!groupId) continue;
+      groups[groupId] ??= [];
+      groups[groupId].push(f);
     }
 
     const zip = new JSZip();
     let merged = 0;
-    const usedNames = new Set<string>();
 
     for (const [groupId, groupFiles] of Object.entries(groups)) {
       if (groupFiles.length < 2) continue;
@@ -142,39 +163,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       groupFiles.sort((a, b) => {
         const A = a.filename.toLowerCase();
         const B = b.filename.toLowerCase();
-        const aIsAll = A.includes("allegato");
-        const bIsAll = B.includes("allegato");
-        if (aIsAll && !bIsAll) return 1;
-        if (!aIsAll && bIsAll) return -1;
+
+        const aIsAllegato = A.includes("allegato");
+        const bIsAllegato = B.includes("allegato");
+
+        if (aIsAllegato && !bIsAllegato) return 1;
+        if (!aIsAllegato && bIsAllegato) return -1;
         return A.localeCompare(B);
       });
 
-      // estrai testo dalla fattura (primo file del gruppo)
+      // estrai testo dalla "fattura" (primo file dopo sort)
       const parsed = await pdfParse(groupFiles[0].buffer);
       const text = parsed.text || "";
 
+      const fattura = extractFatturaNumber(text, groupId);
       const intestatario = extractIntestatario(text);
 
-      // MERGE
+      // merge pagine
       const mergedPdf = await PDFDocument.create();
+
       for (const f of groupFiles) {
         const pdf = await PDFDocument.load(f.buffer);
         const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
         pages.forEach((p) => mergedPdf.addPage(p));
       }
+
       const bytes = await mergedPdf.save();
 
-      // ✅ filename SOLO intestatario (no numeri)
-      let base = safeName(intestatario) || "Documento";
-      let filename = `${base}.pdf`;
+      const outName = `${groupId} - ${safeName(fattura.replace("/", "-"))} - ${safeName(
+        intestatario
+      )}.pdf`;
 
-      // se duplica dentro lo zip, aggiungi groupId per disambiguare
-      if (usedNames.has(filename)) {
-        filename = `${base} (${groupId}).pdf`;
-      }
-      usedNames.add(filename);
-
-      zip.file(filename, bytes);
+      zip.file(outName, bytes);
       merged++;
     }
 
@@ -190,6 +210,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).send(zipBuffer);
   } catch (err: any) {
     console.error(err);
-    res.status(500).send("Errore durante il merge PDF");
+    // in dev è utilissimo vedere il motivo vero
+    res.status(500).send(err?.message || "Errore durante il merge PDF");
   }
 }
