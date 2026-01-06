@@ -26,10 +26,6 @@ const App: React.FC = () => {
 
       const fileInputRef = useRef<HTMLInputElement>(null);
 
-      /* ===========================
-         HELPERS
-      =========================== */
-
       const extractGroupIdFromFilename = (name: string) => {
             const m = name.match(/(\d{2}-\d{4,})/);
             return m ? m[1] : undefined;
@@ -50,10 +46,6 @@ const App: React.FC = () => {
             setIsSuccess(false);
             setError(null);
       };
-
-      /* ===========================
-         FILE HANDLING
-      =========================== */
 
       const handleFiles = (filesList: FileList | null) => {
             if (!filesList) return;
@@ -78,10 +70,6 @@ const App: React.FC = () => {
             setError(null);
       };
 
-      /* ===========================
-         UI GROUPING
-      =========================== */
-
       const groupedFiles = useMemo(() => {
             return files.reduce<Record<string, FileWithStatus[]>>((acc, f) => {
                   const key = f.groupId || "altro";
@@ -92,10 +80,6 @@ const App: React.FC = () => {
       }, [files]);
 
       const hasAnyPairedGroup = files.some((f) => f.paired);
-
-      /* ===========================
-         API CALL (Vercel Serverless)
-      =========================== */
 
       const processFiles = async () => {
             if (files.length === 0) {
@@ -118,7 +102,6 @@ const App: React.FC = () => {
                   const formData = new FormData();
                   files.forEach((f) => formData.append("pdfs", f.file));
 
-                  // IMPORTANT: endpoint relativo, compatibile Vercel
                   const res = await fetch("/api/merge-pdfs", {
                         method: "POST",
                         body: formData,
@@ -126,7 +109,7 @@ const App: React.FC = () => {
 
                   if (!res.ok) {
                         const txt = await res.text();
-                        throw new Error(txt || "Errore durante il merge");
+                        throw new Error(txt || `Errore server (${res.status})`);
                   }
 
                   const blob = await res.blob();
@@ -150,7 +133,6 @@ const App: React.FC = () => {
 
       return (
             <div className="min-h-screen py-12 px-4 flex flex-col items-center bg-[#f8fafc] text-slate-800">
-                  {/* Header */}
                   <div className="text-center mb-8">
                         <h1 className="text-4xl font-bold mb-2">Unisci PDF con Allegati</h1>
                         <p className="text-slate-500">
@@ -158,14 +140,12 @@ const App: React.FC = () => {
                         </p>
                   </div>
 
-                  {/* Card */}
                   <div className="w-full max-w-2xl bg-white rounded-xl shadow-sm border border-slate-200 p-8">
                         <div className="flex items-center gap-2 mb-6 text-slate-800 font-bold text-lg">
                               <FileIcon size={20} />
                               <span>Unisci PDF con Allegati</span>
                         </div>
 
-                        {/* Drop Zone */}
                         <div
                               onClick={() => fileInputRef.current?.click()}
                               onDragOver={(e) => {
@@ -193,7 +173,8 @@ const App: React.FC = () => {
                               />
                               <Upload
                                     size={48}
-                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"}`}
+                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"
+                                          }`}
                                     strokeWidth={1.5}
                               />
                               <p className="text-slate-800 font-semibold text-lg mb-1">Trascina i file PDF qui</p>
@@ -206,7 +187,6 @@ const App: React.FC = () => {
                               </button>
                         </div>
 
-                        {/* File List */}
                         {files.length > 0 && (
                               <div className="mt-8 space-y-4">
                                     <div className="flex items-center justify-between font-semibold text-slate-700 pb-2 border-b border-slate-100">
@@ -225,7 +205,9 @@ const App: React.FC = () => {
                                                                   : "bg-slate-50 border-slate-100"
                                                             }`}
                                                 >
-                                                      <div className="text-xs font-bold text-slate-400 uppercase mb-2">ID: {groupId}</div>
+                                                      <div className="text-xs font-bold text-slate-400 uppercase mb-2">
+                                                            ID: {groupId}
+                                                      </div>
 
                                                       <div className="space-y-1">
                                                             {groupFiles.map((f) => (
@@ -252,7 +234,6 @@ const App: React.FC = () => {
                                           ))}
                                     </div>
 
-                                    {/* Bottone: sempre cliccabile (demo-safe), ma gestisce errori */}
                                     <button
                                           onClick={processFiles}
                                           disabled={isProcessing}
@@ -279,23 +260,22 @@ const App: React.FC = () => {
                         )}
                   </div>
 
-                  {/* Footer */}
                   <div className="mt-12 text-center text-slate-400 text-sm max-w-lg space-y-2">
                         <p>Carica file PDF con lo stesso numero nel titolo (es. 25-0249.pdf e 25-0249_Allegato1.pdf)</p>
-                        <p>I file uniti saranno rinominati con intestatario e numero proforma</p>
+                        <p>I PDF uniti saranno rinominati con intestatario e numero fattura/proforma</p>
                         <p className="pt-4 font-medium">Made with Dyad</p>
                   </div>
 
-                  {/* Toasts */}
                   <AnimatePresence>
                         {error && (
                               <motion.div
                                     initial={{ opacity: 0, y: 20 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: 20 }}
-                                    className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-red-50 border border-red-200 text-red-600 px-6 py-3 rounded-full shadow-lg flex items-center gap-2"
+                                    className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-red-50 border border-red-200 text-red-600 px-6 py-3 rounded-full shadow-lg flex items-center gap-2 max-w-[92vw]"
                               >
-                                    <AlertCircle size={18} /> {error}
+                                    <AlertCircle size={18} />
+                                    <span className="truncate">{error}</span>
                               </motion.div>
                         )}
                         {isSuccess && (
