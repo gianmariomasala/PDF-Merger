@@ -159,8 +159,8 @@ const App: React.FC = () => {
                                     handleFiles(e.dataTransfer.files);
                               }}
                               className={`border-2 border-dashed rounded-lg p-12 flex flex-col items-center justify-center cursor-pointer transition-all ${isDragging
-                                          ? "border-blue-500 bg-blue-50/50"
-                                          : "border-slate-200 hover:border-blue-300 hover:bg-slate-50 bg-[#fafafa]"
+                                    ? "border-blue-500 bg-blue-50/50"
+                                    : "border-slate-200 hover:border-blue-300 hover:bg-slate-50 bg-[#fafafa]"
                                     }`}
                         >
                               <input
@@ -205,8 +205,8 @@ const App: React.FC = () => {
                                                 <div
                                                       key={groupId}
                                                       className={`p-3 rounded-lg border ${groupId !== "altro" && groupFiles.length >= 2
-                                                                  ? "bg-green-50 border-green-100"
-                                                                  : "bg-slate-50 border-slate-100"
+                                                            ? "bg-green-50 border-green-100"
+                                                            : "bg-slate-50 border-slate-100"
                                                             }`}
                                                 >
                                                       <div className="text-xs font-bold text-slate-400 uppercase mb-2">
@@ -245,8 +245,8 @@ const App: React.FC = () => {
                                           onClick={processFiles}
                                           disabled={isProcessing}
                                           className={`w-full py-3 rounded-lg font-bold text-white transition-all flex items-center justify-center gap-2 ${isProcessing
-                                                      ? "bg-slate-300 cursor-not-allowed"
-                                                      : "bg-blue-600 hover:bg-blue-700"
+                                                ? "bg-slate-300 cursor-not-allowed"
+                                                : "bg-blue-600 hover:bg-blue-700"
                                                 }`}
                                     >
                                           {isProcessing ? (
@@ -286,11 +286,18 @@ const App: React.FC = () => {
                                     href="https://www.arcadiadesignstudio.net/apps/"
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="text-slate-500 hover:text-blue-600 hover:underline transition-colors"
+                                    className="
+      text-slate-500
+      hover:text-slate-300
+      hover:underline
+      transition-colors
+      duration-200
+    "
                               >
                                     Arcadia:Design Studio
                               </a>
                         </p>
+
                   </div>
 
                   <AnimatePresence>
