@@ -173,8 +173,7 @@ const App: React.FC = () => {
                               />
                               <Upload
                                     size={48}
-                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"
-                                          }`}
+                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"}`}
                                     strokeWidth={1.5}
                               />
                               <p className="text-slate-800 font-semibold text-lg mb-1">Trascina i file PDF qui</p>
@@ -263,7 +262,18 @@ const App: React.FC = () => {
                   <div className="mt-12 text-center text-slate-400 text-sm max-w-lg space-y-2">
                         <p>Carica file PDF con lo stesso numero nel titolo (es. 25-0249.pdf e 25-0249_Allegato1.pdf)</p>
                         <p>I PDF uniti saranno rinominati con intestatario e numero fattura/proforma</p>
-                        <p className="pt-4 font-medium">Made with Dyad</p>
+
+                        <p className="pt-4 font-medium">
+                              Powered by{" "}
+                              <a
+                                    href="https://www.arcadiadesignstudio.net/apps/"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="hover:underline"
+                              >
+                                    Arcadia:Design Studio
+                              </a>
+                        </p>
                   </div>
 
                   <AnimatePresence>
