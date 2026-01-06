@@ -5,7 +5,7 @@ import pdfParse from "pdf-parse";
 import { PDFDocument } from "pdf-lib";
 
 /* =========================
-   Types & helpers
+   Types & response helpers
 ========================= */
 
 type VercelReq = IncomingMessage & { method?: string; url?: string };
@@ -49,7 +49,7 @@ function withStatus(res: ServerResponse): VercelRes {
 }
 
 /* =========================
-   Filename & text utils
+   Filename utils
 ========================= */
 
 function extractGroupIdFromFilename(name: string) {
@@ -77,48 +77,66 @@ function isGenericClinicLabel(s: string) {
   return v === "clinica veterinaria" || v === "ambulatorio veterinario";
 }
 
+/* =========================
+   Intestatario extraction (ROBUST)
+========================= */
+
 /**
- * Regola finale:
- * 1) Priorità assoluta: riga "Intestatario: XXXXX"
- *    - se è "Clinica Veterinaria" o "Ambulatorio Veterinario" da SOLO => NON valido (serve nome a fianco)
- * 2) Fallback: "Spett.le" => riga successiva
+ * Regola definitiva:
+ * 1) Fonte di verità: campo "Intestatario:" (robusto anche se spezzato su più righe).
+ *    - Se intestatario = "Clinica Veterinaria" o "Ambulatorio Veterinario" DA SOLO => NON valido (serve nome distintivo)
+ * 2) Fallback: blocco "Spett.le" => prima riga sensata successiva (saltando Data, Fattura, numeri, ecc.)
  */
 function pickIntestatarioFromText(text: string): string | null {
   const clean = text.replace(/\r/g, "");
 
-  // 1) Intestatario: prendi tutto finché non arriva un'altra etichetta
-  const match = clean.match(
-    /Intestatario:\s*([\s\S]*?)(?:\n[A-Z][a-zA-Zàèéìòù]+:|\nCompetenza:|\nData:|\nFattura|\nPagina)/i
-  );
+  // 1) "Intestatario:" — prende tutto finché non arriva un campo successivo tipico
+  const idx = clean.toLowerCase().indexOf("intestatario:");
+  if (idx >= 0) {
+    let tail = clean.slice(idx + "intestatario:".length);
+    tail = tail.replace(/\n+/g, "\n").trim();
 
-  if (match) {
-    const value = match[1]
-      .replace(/\n/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    // stop su campi successivi comuni (include varianti che compaiono nei tuoi PDF)
+    const stop = tail.search(
+      /\n(?:allegato\b|allegato\s+fattura\b|del\b|del:|competenza:|data:|fattura\b|fattura\s*n[°º]?:|codice\b|codice\s+cliente\b|partita\s+iva\b|p\.?\s*iva\b|pagina\b|stampato\b)/i
+    );
 
-    const lower = value.toLowerCase();
+    const raw = normalizeSpaces((stop >= 0 ? tail.slice(0, stop) : tail).replace(/\n/g, " "));
 
-    // blocca intestatari GENERICI
-    if (
-      lower === "clinica veterinaria" ||
-      lower === "ambulatorio veterinario"
-    ) {
-      // fallback sotto
-    } else if (value.length > 3) {
-      return value;
+    if (raw && !isGenericClinicLabel(raw)) {
+      return raw; // ✅ include Dr, Panda s.r.l., Clinica Veterinaria Panda, A.V. Cave Canem, ecc.
     }
+    // se è generico -> fallback sotto
   }
 
-  // 2) fallback: Spett.le → riga successiva
+  // 2) fallback: "Spett.le" -> prendi la prima riga SENSATA dopo (saltando "Data", "Fattura", "del:", numeri fattura…)
   const lines = clean
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const idx = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
-  if (idx >= 0 && lines[idx + 1]) {
-    return lines[idx + 1].trim();
+  const spett = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
+  if (spett >= 0) {
+    for (let i = spett + 1; i < Math.min(spett + 8, lines.length); i++) {
+      const c = lines[i];
+      if (!c) continue;
+
+      // scarta etichette/rumore tipico
+      if (/^data\b/i.test(c)) continue;
+      if (/^del\b/i.test(c)) continue;
+      if (/^fattura\b/i.test(c)) continue;
+      if (/^fattura\s*n[°º]?\b/i.test(c)) continue;
+
+      // scarta numeri fattura / formati tipici
+      if (/^\d{2}\/\d{5}\b/.test(c)) continue; // 25/01963
+      if (/^\d{2}-\d{4,}\b/.test(c)) continue; // 25-01963
+      if (/^\d{2}\/\d{2}\/\d{4}\b/.test(c)) continue; // 02/12/2025
+
+      // scarta cose troppo corte o simboliche
+      if (c.length < 3) continue;
+
+      return c;
+    }
   }
 
   return null;
@@ -173,7 +191,7 @@ async function readMultipart(req: VercelReq): Promise<UploadedFile[]> {
 }
 
 /* =========================
-   PDF helpers
+   PDF merge
 ========================= */
 
 async function mergePdfsInOrder(buffers: Buffer[]) {
