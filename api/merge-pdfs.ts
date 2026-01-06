@@ -68,49 +68,49 @@ function sanitizeFilenamePart(s: string) {
     .trim();
 }
 
+function normalizeSpaces(s: string) {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function isGenericClinicLabel(s: string) {
+  const v = normalizeSpaces(s).toLowerCase();
+  return v === "clinica veterinaria" || v === "ambulatorio veterinario";
+}
+
+/**
+ * Regola finale:
+ * 1) Priorità assoluta: riga "Intestatario: XXXXX"
+ *    - se è "Clinica Veterinaria" o "Ambulatorio Veterinario" da SOLO => NON valido (serve nome a fianco)
+ * 2) Fallback: "Spett.le" => riga successiva
+ */
 function pickIntestatarioFromText(text: string): string | null {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const idx = lines.findIndex((l) =>
-    /^spett\.?le\.?/i.test(l)
-  );
-
-  if (idx >= 0 && lines[idx + 1]) {
-    return lines[idx + 1];
+  // 1) PRIORITÀ: "Intestatario:"
+  const intestLine = lines.find((l) => /^intestatario\s*:/i.test(l));
+  if (intestLine) {
+    const value = normalizeSpaces(intestLine.replace(/^intestatario\s*:/i, ""));
+    if (value && !isGenericClinicLabel(value)) {
+      return value; // ✅ qui includiamo Dr, Panda s.r.l., Clinica Veterinaria Panda, ecc.
+    }
+    // se è generico ("Clinica Veterinaria" / "Ambulatorio Veterinario") -> fallback
   }
 
-  return (
-    lines.find(
-      (l) => !/^via\b|^v\.\b|^piazza\b|^p\.za\b/i.test(l)
-    ) || null
-  );
-}
+  // 2) FALLBACK: "Spett.le" -> riga successiva
+  const idx = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
+  if (idx >= 0) {
+    const candidate = lines[idx + 1] ? normalizeSpaces(lines[idx + 1]) : "";
+    if (candidate) return candidate;
+  }
 
-function stripCompanySuffixForFilename(name: string) {
-  let s = name
-    .replace(/^spett\.?le\.?\s*/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const patterns = [
-    /\s+s\.?\s*a\.?\s*s\.?\s*\.?$/i,
-    /\s+s\.?\s*r\.?\s*l\.?\s*\.?$/i,
-    /\s+s\.?\s*p\.?\s*a\.?\s*\.?$/i,
-    /\s+s\.?\s*n\.?\s*c\.?\s*\.?$/i,
-    /\s+srls\.?\s*$/i,
-    /\s+soc\.?\s*coop\.?\s*\.?$/i,
-  ];
-
-  for (const p of patterns) s = s.replace(p, "");
-
-  return s.trim() || name.trim();
+  return null;
 }
 
 /* =========================
-   Multipart reader (SAFE)
+   Multipart reader (Vercel-safe)
 ========================= */
 
 async function readMultipart(req: VercelReq): Promise<UploadedFile[]> {
@@ -128,7 +128,7 @@ async function readMultipart(req: VercelReq): Promise<UploadedFile[]> {
       headers: req.headers,
       limits: {
         files: 50,
-        fileSize: 25 * 1024 * 1024,
+        fileSize: 25 * 1024 * 1024, // 25 MB per file
       },
     });
 
@@ -136,9 +136,7 @@ async function readMultipart(req: VercelReq): Promise<UploadedFile[]> {
       const chunks: Buffer[] = [];
 
       file.on("data", (d) => chunks.push(Buffer.from(d)));
-      file.on("limit", () =>
-        done(new Error(`File troppo grande: ${info.filename}`))
-      );
+      file.on("limit", () => done(new Error(`File troppo grande: ${info.filename}`)));
       file.on("error", (e) => done(e as Error));
       file.on("end", () => {
         files.push({
@@ -153,9 +151,7 @@ async function readMultipart(req: VercelReq): Promise<UploadedFile[]> {
     bb.on("error", (e) => done(e as Error));
     bb.on("finish", () => done());
 
-    req.on("aborted", () =>
-      done(new Error("Upload interrotto dal client"))
-    );
+    req.on("aborted", () => done(new Error("Upload interrotto dal client")));
 
     req.pipe(bb);
   });
@@ -181,14 +177,11 @@ async function mergePdfsInOrder(buffers: Buffer[]) {
    Handler
 ========================= */
 
-export default async function handler(
-  req: VercelReq,
-  resRaw: ServerResponse
-) {
+export default async function handler(req: VercelReq, resRaw: ServerResponse) {
   const res = withStatus(resRaw);
 
   if (req.method === "GET") {
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, endpoint: "/api/merge-pdfs" });
   }
 
   if (req.method !== "POST") {
@@ -199,17 +192,15 @@ export default async function handler(
     const uploaded = await readMultipart(req);
 
     const pdfs = uploaded.filter(
-      (f) =>
-        /pdf/i.test(f.mimeType || "") ||
-        /\.pdf$/i.test(f.filename || "")
+      (f) => /pdf/i.test(f.mimeType || "") || /\.pdf$/i.test(f.filename || "")
     );
 
     if (pdfs.length < 2) {
       return res.status(400).send("Carica almeno 2 PDF.");
     }
 
+    // gruppi per ID (25-02049, 26-02079, ecc.)
     const groups = new Map<string, UploadedFile[]>();
-
     for (const f of pdfs) {
       const gid = extractGroupIdFromFilename(f.filename) || "altro";
       if (!groups.has(gid)) groups.set(gid, []);
@@ -219,45 +210,40 @@ export default async function handler(
     const zip = new JSZip();
 
     for (const [groupId, files] of groups) {
-      if (groupId === "altro" || files.length < 2) continue;
+      if (groupId === "altro") continue;
+      if (files.length < 2) continue;
 
-      const main =
-        files.find((f) => !isAllegato(f.filename)) || files[0];
-
+      // ordine: main (non allegato) prima, poi allegati
+      const main = files.find((f) => !isAllegato(f.filename)) || files[0];
       const allegati = files
         .filter((f) => f !== main)
-        .sort((a, b) =>
-          a.filename.localeCompare(b.filename, "it")
-        );
+        .sort((a, b) => a.filename.localeCompare(b.filename, "it"));
 
+      // estrazione intestatario dal MAIN
       let intestatario = "Documento";
-
       try {
         const parsed = await pdfParse(main.buffer);
-        const raw = pickIntestatarioFromText(parsed.text || "");
-        if (raw) intestatario = stripCompanySuffixForFilename(raw);
-      } catch { }
+        const picked = pickIntestatarioFromText(parsed.text || "");
+        if (picked) intestatario = picked;
+      } catch {
+        // se parsing testo fallisce, continuiamo comunque
+      }
 
-      const merged = await mergePdfsInOrder([
-        main.buffer,
-        ...allegati.map((a) => a.buffer),
-      ]);
+      const merged = await mergePdfsInOrder([main.buffer, ...allegati.map((a) => a.buffer)]);
 
-      const safe = sanitizeFilenamePart(intestatario);
-      zip.file(`${safe}_${groupId}.pdf`, merged);
+      const safeName = sanitizeFilenamePart(intestatario);
+      const outName = `${safeName}_${groupId}.pdf`;
+      zip.file(outName, merged);
     }
 
     const zipBuf = await zip.generateAsync({ type: "nodebuffer" });
 
     res.setHeader("content-type", "application/zip");
-    res.setHeader(
-      "content-disposition",
-      `attachment; filename="pdf_uniti.zip"`
-    );
+    res.setHeader("content-disposition", `attachment; filename="pdf_uniti.zip"`);
 
     res.status(200);
     resRaw.end(zipBuf);
   } catch (err: any) {
-    return res.status(500).send(err?.message || "Errore merge PDF");
+    return res.status(500).send(err?.message || "Errore durante il merge PDF");
   }
 }
