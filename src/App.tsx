@@ -286,13 +286,7 @@ const App: React.FC = () => {
                                     href="https://www.arcadiadesignstudio.net/apps/"
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="
-      text-slate-500
-      hover:text-slate-300
-      hover:underline
-      transition-colors
-      duration-200
-    "
+                                    className="text-slate-600 hover:text-slate-500 hover:underline transition-colors duration-200"
                               >
                                     Arcadia:Design Studio
                               </a>
