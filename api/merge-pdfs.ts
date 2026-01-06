@@ -84,26 +84,40 @@ function isGenericClinicLabel(s: string) {
  * 2) Fallback: "Spett.le" => riga successiva
  */
 function pickIntestatarioFromText(text: string): string | null {
-  const lines = text
-    .split(/\r?\n/)
+  const clean = text.replace(/\r/g, "");
+
+  // 1) PRIORITÀ ASSOLUTA: Intestatario: XXXXX (anche su più righe)
+  const intestMatch = clean.match(
+    /Intestatario:\s*([^\n]+(?:\n[^\n]+)?)/i
+  );
+
+  if (intestMatch) {
+    const value = intestMatch[1]
+      .replace(/\n/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // blocca etichette generiche
+    const lower = value.toLowerCase();
+    if (
+      lower === "clinica veterinaria" ||
+      lower === "ambulatorio veterinario"
+    ) {
+      // fallback sotto
+    } else {
+      return value;
+    }
+  }
+
+  // 2) FALLBACK: Spett.le → riga successiva
+  const lines = clean
+    .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
-  // 1) PRIORITÀ: "Intestatario:"
-  const intestLine = lines.find((l) => /^intestatario\s*:/i.test(l));
-  if (intestLine) {
-    const value = normalizeSpaces(intestLine.replace(/^intestatario\s*:/i, ""));
-    if (value && !isGenericClinicLabel(value)) {
-      return value; // ✅ qui includiamo Dr, Panda s.r.l., Clinica Veterinaria Panda, ecc.
-    }
-    // se è generico ("Clinica Veterinaria" / "Ambulatorio Veterinario") -> fallback
-  }
-
-  // 2) FALLBACK: "Spett.le" -> riga successiva
   const idx = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
-  if (idx >= 0) {
-    const candidate = lines[idx + 1] ? normalizeSpaces(lines[idx + 1]) : "";
-    if (candidate) return candidate;
+  if (idx >= 0 && lines[idx + 1]) {
+    return lines[idx + 1].trim();
   }
 
   return null;
