@@ -92,17 +92,13 @@ function pickIntestatarioFromText(text: string): string | null {
     let tail = clean.slice(idx + "intestatario:".length);
     tail = tail.replace(/\n+/g, "\n").trim();
 
-    // stop su campi successivi comuni (include varianti che compaiono nei tuoi PDF)
     const stop = tail.search(
       /\n(?:allegato\b|allegato\s+fattura\b|del\b|del:|competenza\b|competenza:|data\b|data:|fattura\b|fattura\s*n[°º]?:|codice\b|codice\s+cliente\b|partita\s+iva\b|p\.?\s*iva\b|pagina\b|stampato\b)/i
     );
 
     const raw = normalizeSpaces((stop >= 0 ? tail.slice(0, stop) : tail).replace(/\n/g, " "));
 
-    if (raw && !isGenericClinicLabel(raw)) {
-      return raw; // ✅ Dr, Panda s.r.l., Clinica Veterinaria Panda, A.V. Cave Canem, ecc.
-    }
-    // se è generico -> fallback sotto
+    if (raw && !isGenericClinicLabel(raw)) return raw;
   }
 
   // 2) fallback: "Spett.le" -> prima riga sensata dopo
@@ -117,13 +113,11 @@ function pickIntestatarioFromText(text: string): string | null {
       const c = lines[i];
       if (!c) continue;
 
-      // scarta etichette/rumore tipico
       if (/^data\b/i.test(c)) continue;
       if (/^del\b/i.test(c)) continue;
       if (/^fattura\b/i.test(c)) continue;
       if (/^fattura\s*n[°º]?\b/i.test(c)) continue;
 
-      // scarta numeri fattura / formati tipici
       if (/^\d{2}\/\d{5}\b/.test(c)) continue; // 25/01963
       if (/^\d{2}-\d{4,}\b/.test(c)) continue; // 25-01963
       if (/^\d{2}\/\d{2}\/\d{4}\b/.test(c)) continue; // 02/12/2025
@@ -135,6 +129,89 @@ function pickIntestatarioFromText(text: string): string | null {
   }
 
   return null;
+}
+
+/* =========================
+   Detect invoice vs attachment (CONTENT-BASED)
+========================= */
+
+function looksLikeAttachmentDetail(text: string) {
+  const t = (text || "").toLowerCase();
+  // questi sono segnali forti del "dettaglio pazienti" / allegato
+  return (
+    t.includes("allegato fattura") ||
+    t.includes("dettaglio pazienti") ||
+    t.includes("dettaglio prestazioni") ||
+    t.includes("dettaglio") && t.includes("pazienti")
+  );
+}
+
+function looksLikeInvoice(text: string) {
+  const t = (text || "").toLowerCase();
+  // segnali forti di fattura/proforma (documento principale)
+  return (
+    t.includes("fattura proforma") ||
+    t.includes("totale fattura") ||
+    t.includes("iva vendite") ||
+    t.includes("imponibile complessivo") ||
+    t.includes("totale imponibile") ||
+    t.includes("totale iva")
+  );
+}
+
+type ParsedEntry = {
+  file: UploadedFile;
+  text: string;
+  isInvoice: boolean;
+  isAttachment: boolean;
+};
+
+/**
+ * Ordine merge richiesto:
+ * 1) Fattura (main) PRIMA
+ * 2) Allegato/i DOPO
+ *
+ * Se non riusciamo a capirlo, fallback stabile:
+ * - main = primo per filename
+ */
+async function splitMainAndAttachments(groupFiles: UploadedFile[]) {
+  // parse di tutti i pdf del gruppo (sono pochi, 2-4 di solito)
+  const parsedList: ParsedEntry[] = await Promise.all(
+    groupFiles.map(async (f) => {
+      try {
+        const p = await pdfParse(f.buffer);
+        const text = p.text || "";
+        const isAtt = looksLikeAttachmentDetail(text);
+        const isInv = looksLikeInvoice(text) && !isAtt;
+        return { file: f, text, isInvoice: isInv, isAttachment: isAtt };
+      } catch {
+        return { file: f, text: "", isInvoice: false, isAttachment: false };
+      }
+    })
+  );
+
+  // scegli main: prima fattura che sembra tale
+  let mainEntry = parsedList.find((x) => x.isInvoice);
+
+  // se non trovato, scegli quello che NON sembra allegato
+  if (!mainEntry) mainEntry = parsedList.find((x) => !x.isAttachment);
+
+  // fallback finale: primo per filename (stabile)
+  if (!mainEntry) {
+    const fallback = [...parsedList].sort((a, b) =>
+      (a.file.filename || "").localeCompare(b.file.filename || "", "it")
+    );
+    mainEntry = fallback[0];
+  }
+
+  const main = mainEntry.file;
+
+  const attachments = parsedList
+    .filter((x) => x.file !== main)
+    .map((x) => x.file)
+    .sort((a, b) => (a.filename || "").localeCompare(b.filename || "", "it"));
+
+  return { main, attachments, parsedList };
 }
 
 /* =========================
@@ -241,28 +318,20 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
       if (groupId === "altro") continue;
       if (groupFiles.length < 2) continue;
 
-      // ✅ Regola: allegato viene sempre dopo → ordiniamo per filename per stabilità
-      const ordered = [...groupFiles].sort((a, b) =>
-        (a.filename || "").localeCompare(b.filename || "", "it")
-      );
+      // ✅ split robusto: fattura prima, allegati dopo
+      const { main, attachments, parsedList } = await splitMainAndAttachments(groupFiles);
 
-      const main = ordered[0];
-      const allegati = ordered.slice(1);
-
-      // estrazione intestatario: MAIN -> se manca, ALLEGATI
+      // ✅ intestatario: prova nel main, poi negli allegati
       let intestatario = "Documento";
-
       try {
-        const parsedMain = await pdfParse(main.buffer);
-        let picked = pickIntestatarioFromText(parsedMain.text || "");
+        // se abbiamo già il testo parsato (parsedList), riusiamolo per il main
+        const mainText = parsedList.find((x) => x.file === main)?.text ?? "";
+        let picked = pickIntestatarioFromText(mainText);
 
         if (!picked) {
-          for (const a of allegati) {
-            // guardrail (opzionale, ma sicuro)
-            if (!/pdf/i.test(a.mimeType || "") && !/\.pdf$/i.test(a.filename || "")) continue;
-
-            const parsedAllegato = await pdfParse(a.buffer);
-            picked = pickIntestatarioFromText(parsedAllegato.text || "");
+          for (const a of attachments) {
+            const txt = parsedList.find((x) => x.file === a)?.text ?? "";
+            picked = pickIntestatarioFromText(txt);
             if (picked) break;
           }
         }
@@ -272,7 +341,8 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
         // continuiamo comunque
       }
 
-      const merged = await mergePdfsInOrder([main.buffer, ...allegati.map((a) => a.buffer)]);
+      // ✅ merge: FATTURA prima, poi ALLEGATI
+      const merged = await mergePdfsInOrder([main.buffer, ...attachments.map((a) => a.buffer)]);
 
       const safeName = sanitizeFilenamePart(intestatario);
       zip.file(`${safeName}_${groupId}.pdf`, merged);
