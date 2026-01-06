@@ -57,10 +57,6 @@ function extractGroupIdFromFilename(name: string) {
   return m ? m[1] : undefined;
 }
 
-function isAllegato(name: string) {
-  return /_allegato/i.test(name);
-}
-
 function sanitizeFilenamePart(s: string) {
   return s
     .replace(/[\/\\?%*:|"<>]/g, "_")
@@ -98,18 +94,18 @@ function pickIntestatarioFromText(text: string): string | null {
 
     // stop su campi successivi comuni (include varianti che compaiono nei tuoi PDF)
     const stop = tail.search(
-      /\n(?:allegato\b|allegato\s+fattura\b|del\b|del:|competenza:|data:|fattura\b|fattura\s*n[°º]?:|codice\b|codice\s+cliente\b|partita\s+iva\b|p\.?\s*iva\b|pagina\b|stampato\b)/i
+      /\n(?:allegato\b|allegato\s+fattura\b|del\b|del:|competenza\b|competenza:|data\b|data:|fattura\b|fattura\s*n[°º]?:|codice\b|codice\s+cliente\b|partita\s+iva\b|p\.?\s*iva\b|pagina\b|stampato\b)/i
     );
 
     const raw = normalizeSpaces((stop >= 0 ? tail.slice(0, stop) : tail).replace(/\n/g, " "));
 
     if (raw && !isGenericClinicLabel(raw)) {
-      return raw; // ✅ include Dr, Panda s.r.l., Clinica Veterinaria Panda, A.V. Cave Canem, ecc.
+      return raw; // ✅ Dr, Panda s.r.l., Clinica Veterinaria Panda, A.V. Cave Canem, ecc.
     }
     // se è generico -> fallback sotto
   }
 
-  // 2) fallback: "Spett.le" -> prendi la prima riga SENSATA dopo (saltando "Data", "Fattura", "del:", numeri fattura…)
+  // 2) fallback: "Spett.le" -> prima riga sensata dopo
   const lines = clean
     .split("\n")
     .map((l) => l.trim())
@@ -117,7 +113,7 @@ function pickIntestatarioFromText(text: string): string | null {
 
   const spett = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
   if (spett >= 0) {
-    for (let i = spett + 1; i < Math.min(spett + 8, lines.length); i++) {
+    for (let i = spett + 1; i < Math.min(spett + 10, lines.length); i++) {
       const c = lines[i];
       if (!c) continue;
 
@@ -132,7 +128,6 @@ function pickIntestatarioFromText(text: string): string | null {
       if (/^\d{2}-\d{4,}\b/.test(c)) continue; // 25-01963
       if (/^\d{2}\/\d{2}\/\d{4}\b/.test(c)) continue; // 02/12/2025
 
-      // scarta cose troppo corte o simboliche
       if (c.length < 3) continue;
 
       return c;
@@ -242,31 +237,45 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
 
     const zip = new JSZip();
 
-    for (const [groupId, files] of groups) {
+    for (const [groupId, groupFiles] of groups) {
       if (groupId === "altro") continue;
-      if (files.length < 2) continue;
+      if (groupFiles.length < 2) continue;
 
-      // ordine: main (non allegato) prima, poi allegati
-      const main = files.find((f) => !isAllegato(f.filename)) || files[0];
-      const allegati = files
-        .filter((f) => f !== main)
-        .sort((a, b) => a.filename.localeCompare(b.filename, "it"));
+      // ✅ Regola: allegato viene sempre dopo → ordiniamo per filename per stabilità
+      const ordered = [...groupFiles].sort((a, b) =>
+        (a.filename || "").localeCompare(b.filename || "", "it")
+      );
 
-      // estrazione intestatario dal MAIN
+      const main = ordered[0];
+      const allegati = ordered.slice(1);
+
+      // estrazione intestatario: MAIN -> se manca, ALLEGATI
       let intestatario = "Documento";
+
       try {
-        const parsed = await pdfParse(main.buffer);
-        const picked = pickIntestatarioFromText(parsed.text || "");
+        const parsedMain = await pdfParse(main.buffer);
+        let picked = pickIntestatarioFromText(parsedMain.text || "");
+
+        if (!picked) {
+          for (const a of allegati) {
+            // guardrail (opzionale, ma sicuro)
+            if (!/pdf/i.test(a.mimeType || "") && !/\.pdf$/i.test(a.filename || "")) continue;
+
+            const parsedAllegato = await pdfParse(a.buffer);
+            picked = pickIntestatarioFromText(parsedAllegato.text || "");
+            if (picked) break;
+          }
+        }
+
         if (picked) intestatario = picked;
       } catch {
-        // se parsing testo fallisce, continuiamo comunque
+        // continuiamo comunque
       }
 
       const merged = await mergePdfsInOrder([main.buffer, ...allegati.map((a) => a.buffer)]);
 
       const safeName = sanitizeFilenamePart(intestatario);
-      const outName = `${safeName}_${groupId}.pdf`;
-      zip.file(outName, merged);
+      zip.file(`${safeName}_${groupId}.pdf`, merged);
     }
 
     const zipBuf = await zip.generateAsync({ type: "nodebuffer" });
