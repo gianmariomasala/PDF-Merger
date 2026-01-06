@@ -173,11 +173,16 @@ const App: React.FC = () => {
                               />
                               <Upload
                                     size={48}
-                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"}`}
+                                    className={`mb-4 transition-colors ${isDragging ? "text-blue-500" : "text-slate-400"
+                                          }`}
                                     strokeWidth={1.5}
                               />
-                              <p className="text-slate-800 font-semibold text-lg mb-1">Trascina i file PDF qui</p>
-                              <p className="text-slate-400 text-sm mb-6">Oppure clicca per selezionare i file</p>
+                              <p className="text-slate-800 font-semibold text-lg mb-1">
+                                    Trascina i file PDF qui
+                              </p>
+                              <p className="text-slate-400 text-sm mb-6">
+                                    Oppure clicca per selezionare i file
+                              </p>
                               <button
                                     type="button"
                                     className="bg-[#f0f4f8] text-slate-600 px-6 py-2 rounded-md font-medium hover:bg-slate-200 transition-colors"
@@ -210,7 +215,10 @@ const App: React.FC = () => {
 
                                                       <div className="space-y-1">
                                                             {groupFiles.map((f) => (
-                                                                  <div key={f.id} className="flex items-center justify-between text-sm">
+                                                                  <div
+                                                                        key={f.id}
+                                                                        className="flex items-center justify-between text-sm"
+                                                                  >
                                                                         <div className="flex items-center gap-2 text-slate-600 truncate">
                                                                               <FileText size={14} />
                                                                               <span className="truncate">{f.file.name}</span>
@@ -236,7 +244,9 @@ const App: React.FC = () => {
                                     <button
                                           onClick={processFiles}
                                           disabled={isProcessing}
-                                          className={`w-full py-3 rounded-lg font-bold text-white transition-all flex items-center justify-center gap-2 ${isProcessing ? "bg-slate-300 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
+                                          className={`w-full py-3 rounded-lg font-bold text-white transition-all flex items-center justify-center gap-2 ${isProcessing
+                                                      ? "bg-slate-300 cursor-not-allowed"
+                                                      : "bg-blue-600 hover:bg-blue-700"
                                                 }`}
                                     >
                                           {isProcessing ? (
@@ -252,7 +262,8 @@ const App: React.FC = () => {
 
                                     {!hasAnyPairedGroup && (
                                           <p className="text-xs text-slate-400 text-center">
-                                                Carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e 25-0249_Allegato1.pdf)
+                                                Carica almeno 2 PDF con lo stesso ID (es. 25-0249.pdf e
+                                                25-0249_Allegato1.pdf)
                                           </p>
                                     )}
                               </div>
@@ -260,16 +271,22 @@ const App: React.FC = () => {
                   </div>
 
                   <div className="mt-12 text-center text-slate-400 text-sm max-w-lg space-y-2">
-                        <p>Carica file PDF con lo stesso numero nel titolo (es. 25-0249.pdf e 25-0249_Allegato1.pdf)</p>
-                        <p>I PDF uniti saranno rinominati con intestatario e numero fattura/proforma</p>
+                        <p>
+                              Carica file PDF con lo stesso numero nel titolo (es. 25-0249.pdf e
+                              25-0249_Allegato1.pdf)
+                        </p>
+                        <p>
+                              I PDF uniti saranno rinominati con intestatario e numero
+                              fattura/proforma
+                        </p>
 
-                        <p className="pt-4 font-medium">
+                        <p className="pt-4 font-medium text-slate-400">
                               Powered by{" "}
                               <a
                                     href="https://www.arcadiadesignstudio.net/apps/"
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="hover:underline"
+                                    className="text-slate-500 hover:text-blue-600 hover:underline transition-colors"
                               >
                                     Arcadia:Design Studio
                               </a>
