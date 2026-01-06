@@ -86,30 +86,31 @@ function isGenericClinicLabel(s: string) {
 function pickIntestatarioFromText(text: string): string | null {
   const clean = text.replace(/\r/g, "");
 
-  // 1) PRIORITÀ ASSOLUTA: Intestatario: XXXXX (anche su più righe)
-  const intestMatch = clean.match(
-    /Intestatario:\s*([^\n]+(?:\n[^\n]+)?)/i
+  // 1) Intestatario: prendi tutto finché non arriva un'altra etichetta
+  const match = clean.match(
+    /Intestatario:\s*([\s\S]*?)(?:\n[A-Z][a-zA-Zàèéìòù]+:|\nCompetenza:|\nData:|\nFattura|\nPagina)/i
   );
 
-  if (intestMatch) {
-    const value = intestMatch[1]
+  if (match) {
+    const value = match[1]
       .replace(/\n/g, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-    // blocca etichette generiche
     const lower = value.toLowerCase();
+
+    // blocca intestatari GENERICI
     if (
       lower === "clinica veterinaria" ||
       lower === "ambulatorio veterinario"
     ) {
       // fallback sotto
-    } else {
+    } else if (value.length > 3) {
       return value;
     }
   }
 
-  // 2) FALLBACK: Spett.le → riga successiva
+  // 2) fallback: Spett.le → riga successiva
   const lines = clean
     .split("\n")
     .map((l) => l.trim())
