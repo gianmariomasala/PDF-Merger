@@ -73,20 +73,31 @@ function isGenericClinicLabel(s: string) {
   return v === "clinica veterinaria" || v === "ambulatorio veterinario";
 }
 
+function looksLikeAddressLine(s: string) {
+  const v = s.toLowerCase();
+  if (/^\d{5}\b/.test(s)) return true; // CAP
+  if (/\b(via|viale|piazza|p\.za|strada|cascina|corso|largo)\b/i.test(v)) return true;
+  if (/\b(\d{1,4})([\/-]\w+)?\b/.test(s) && /\b(via|viale|strada|corso|piazza|cascina)\b/i.test(v))
+    return true;
+  if (/\b(al|mi|no|bo|to|ge|rm|na|fi|bs|bg|pv|va|lc|cr|mn|pc|pr|mo|re|ra|fc|rn|ts|ud|tn|bz)\b/i.test(v))
+    return true;
+  return false;
+}
+
 /* =========================
-   Intestatario extraction (ROBUST)
+   Intestatario extraction (ROBUST, CDV-proof)
 ========================= */
 
 /**
- * Regola definitiva:
- * 1) Fonte di verità: campo "Intestatario:" (robusto anche se spezzato su più righe).
- *    - Se intestatario = "Clinica Veterinaria" o "Ambulatorio Veterinario" DA SOLO => NON valido (serve nome distintivo)
- * 2) Fallback: blocco "Spett.le" => prima riga sensata successiva (saltando Data, Fattura, numeri, ecc.)
+ * Regola definitiva (copre TUTTI i casi CDV):
+ * 1) Se esiste "Intestatario:" => usa quello (anche multi-line)
+ * 2) Altrimenti, per i layout CDV nuovi: prendi la riga "nome cliente" SUBITO PRIMA di "Spett.le"
+ * 3) Fallback legacy: "Spett.le" => prima riga sensata DOPO (saltando Data, Fattura, numeri, ecc.)
  */
 function pickIntestatarioFromText(text: string): string | null {
   const clean = text.replace(/\r/g, "");
 
-  // 1) "Intestatario:" — prende tutto finché non arriva un campo successivo tipico
+  // 1) Intestatario: ... (soprattutto negli allegati "dettaglio pazienti")
   const idx = clean.toLowerCase().indexOf("intestatario:");
   if (idx >= 0) {
     let tail = clean.slice(idx + "intestatario:".length);
@@ -97,34 +108,60 @@ function pickIntestatarioFromText(text: string): string | null {
     );
 
     const raw = normalizeSpaces((stop >= 0 ? tail.slice(0, stop) : tail).replace(/\n/g, " "));
-
     if (raw && !isGenericClinicLabel(raw)) return raw;
   }
 
-  // 2) fallback: "Spett.le" -> prima riga sensata dopo
+  // Prepara lines
   const lines = clean
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
   const spett = lines.findIndex((l) => /^spett\.?le\.?/i.test(l));
-  if (spett >= 0) {
-    for (let i = spett + 1; i < Math.min(spett + 10, lines.length); i++) {
+
+  // 2) Layout CDV nuovo: NOME è PRIMA di "Spett.le"
+  if (spett > 0) {
+    // risali fino a trovare una riga "nome" che non sembri indirizzo
+    for (let i = spett - 1; i >= Math.max(0, spett - 6); i--) {
       const c = lines[i];
       if (!c) continue;
 
+      // scarta rumore
+      if (/^(descrizione|quantità|prezzo|importo|iva)\b/i.test(c)) continue;
+      if (/^cdv\b/i.test(c)) continue;
+      if (looksLikeAddressLine(c)) continue;
+
+      // scarta intestatari generici
+      if (isGenericClinicLabel(c)) continue;
+
+      // se è “buono”, è lui
+      if (c.length >= 3) return c;
+    }
+  }
+
+  // 3) Fallback legacy: nome DOPO "Spett.le" (ma non Data)
+  if (spett >= 0) {
+    for (let i = spett + 1; i < Math.min(spett + 12, lines.length); i++) {
+      const c = lines[i];
+      if (!c) continue;
+
+      // scarta etichette/rumore tipico
       if (/^data\b/i.test(c)) continue;
       if (/^del\b/i.test(c)) continue;
       if (/^fattura\b/i.test(c)) continue;
       if (/^fattura\s*n[°º]?\b/i.test(c)) continue;
+      if (/^codice\b/i.test(c)) continue;
+      if (/^partita\s+iva\b/i.test(c)) continue;
 
+      // scarta numeri fattura / formati tipici
       if (/^\d{2}\/\d{5}\b/.test(c)) continue; // 25/01963
       if (/^\d{2}-\d{4,}\b/.test(c)) continue; // 25-01963
       if (/^\d{2}\/\d{2}\/\d{4}\b/.test(c)) continue; // 02/12/2025
 
-      if (c.length < 3) continue;
+      if (looksLikeAddressLine(c)) continue;
+      if (isGenericClinicLabel(c)) continue;
 
-      return c;
+      if (c.length >= 3) return c;
     }
   }
 
@@ -137,18 +174,16 @@ function pickIntestatarioFromText(text: string): string | null {
 
 function looksLikeAttachmentDetail(text: string) {
   const t = (text || "").toLowerCase();
-  // questi sono segnali forti del "dettaglio pazienti" / allegato
   return (
     t.includes("allegato fattura") ||
     t.includes("dettaglio pazienti") ||
     t.includes("dettaglio prestazioni") ||
-    t.includes("dettaglio") && t.includes("pazienti")
+    (t.includes("dettaglio") && t.includes("pazienti"))
   );
 }
 
 function looksLikeInvoice(text: string) {
   const t = (text || "").toLowerCase();
-  // segnali forti di fattura/proforma (documento principale)
   return (
     t.includes("fattura proforma") ||
     t.includes("totale fattura") ||
@@ -166,16 +201,7 @@ type ParsedEntry = {
   isAttachment: boolean;
 };
 
-/**
- * Ordine merge richiesto:
- * 1) Fattura (main) PRIMA
- * 2) Allegato/i DOPO
- *
- * Se non riusciamo a capirlo, fallback stabile:
- * - main = primo per filename
- */
 async function splitMainAndAttachments(groupFiles: UploadedFile[]) {
-  // parse di tutti i pdf del gruppo (sono pochi, 2-4 di solito)
   const parsedList: ParsedEntry[] = await Promise.all(
     groupFiles.map(async (f) => {
       try {
@@ -190,13 +216,9 @@ async function splitMainAndAttachments(groupFiles: UploadedFile[]) {
     })
   );
 
-  // scegli main: prima fattura che sembra tale
   let mainEntry = parsedList.find((x) => x.isInvoice);
-
-  // se non trovato, scegli quello che NON sembra allegato
   if (!mainEntry) mainEntry = parsedList.find((x) => !x.isAttachment);
 
-  // fallback finale: primo per filename (stabile)
   if (!mainEntry) {
     const fallback = [...parsedList].sort((a, b) =>
       (a.file.filename || "").localeCompare(b.file.filename || "", "it")
@@ -304,7 +326,6 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
       return res.status(400).send("Carica almeno 2 PDF.");
     }
 
-    // gruppi per ID (25-02049, 26-02079, ecc.)
     const groups = new Map<string, UploadedFile[]>();
     for (const f of pdfs) {
       const gid = extractGroupIdFromFilename(f.filename) || "altro";
@@ -318,13 +339,12 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
       if (groupId === "altro") continue;
       if (groupFiles.length < 2) continue;
 
-      // ✅ split robusto: fattura prima, allegati dopo
+      // main = fattura, attachments = allegati (ordine merge: fattura prima)
       const { main, attachments, parsedList } = await splitMainAndAttachments(groupFiles);
 
-      // ✅ intestatario: prova nel main, poi negli allegati
+      // intestatario: prova nel main (CDV nuovo: prima di Spett.le), poi negli allegati (Intestatario:)
       let intestatario = "Documento";
       try {
-        // se abbiamo già il testo parsato (parsedList), riusiamolo per il main
         const mainText = parsedList.find((x) => x.file === main)?.text ?? "";
         let picked = pickIntestatarioFromText(mainText);
 
@@ -341,7 +361,7 @@ export default async function handler(req: VercelReq, resRaw: ServerResponse) {
         // continuiamo comunque
       }
 
-      // ✅ merge: FATTURA prima, poi ALLEGATI
+      // merge: fattura prima, allegato/i dopo
       const merged = await mergePdfsInOrder([main.buffer, ...attachments.map((a) => a.buffer)]);
 
       const safeName = sanitizeFilenamePart(intestatario);
